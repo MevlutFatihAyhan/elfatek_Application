@@ -1,0 +1,16 @@
+INSERT INTO user_projects (user_id, project_id) VALUES
+('4b5c90fc-e858-4f43-9116-fd7428f0308b', 'c2cd8580-bac6-4345-9a0c-a43914521e3c'),
+('9439463e-f613-462c-975f-70e220186505', 'd13413e2-0383-4a74-8f1f-1c4915eee091'),
+('cfb4b17d-d349-49ae-ad70-13350fded7a6', 'be57d113-0a9b-456c-8940-18777c322e09'),
+('ea589b46-b08d-4f99-9fe3-5a2d9c6b3be9', 'a6c75a4e-df1b-4261-8ae6-3f71692bd0ea'),
+
+-- Ek olarak her kullanıcıya birkaç proje daha ekleyelim:
+('4b5c90fc-e858-4f43-9116-fd7428f0308b', '91010619-ce0d-4ba0-93e4-edc6462914e6'),
+('9439463e-f613-462c-975f-70e220186505', '7685597e-cc77-490a-a0d6-789714986fc0'),
+('cfb4b17d-d349-49ae-ad70-13350fded7a6', '698c35a3-1f7a-408d-95a1-94dadfa5ab60'),
+('ea589b46-b08d-4f99-9fe3-5a2d9c6b3be9', '67470f73-821b-46c8-a793-973119d820b4'),
+
+-- Son birkaç proje dağılımı:
+('4b5c90fc-e858-4f43-9116-fd7428f0308b', '23588506-dab0-4b61-8c2e-cdffb42bc796'),
+('9439463e-f613-462c-975f-70e220186505', '270b0e75-5152-42bb-88e3-8f3417cd5841'),
+('cfb4b17d-d349-49ae-ad70-13350fded7a6', 'c2cd8580-bac6-4345-9a0c-a43914521e3c');

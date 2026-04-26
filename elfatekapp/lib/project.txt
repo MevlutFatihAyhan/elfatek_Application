@@ -1,0 +1,970 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
+import 'package:elfatekapp/services/api_service.dart';
+import '../models/project_tree_response.dart';
+import 'dart:async';
+import 'package:http/http.dart' as http;
+
+Uint8List? _imageBytes;
+String? _selectedImagePath;
+
+class ProjectPage extends StatefulWidget {
+  final String username;
+  final bool isAdmin; // rol kontrolü için flag
+
+  const ProjectPage({super.key, required this.username, this.isAdmin = false});
+
+  @override
+  State<ProjectPage> createState() => _ProjectPageState();
+}
+
+class _ProjectPageState extends State<ProjectPage> {
+  ProjectTreeResponse? _projectTreeResponse;
+  ProjectNode? _currentDrillDownNode;
+  bool _isLoading = true;
+
+  String? _selectedFolderPath;
+  String? _infoTxtContent;
+
+  Timer? _timer;
+  final ApiService _apiService = ApiService();
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchProjectTreeAndInit();
+    // periyodik güncelleme
+    _timer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      _fetchProjectTreeAndInit(showLoading: false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _fetchProjectTreeAndInit({bool showLoading = true}) async {
+    if (showLoading) {
+      setState(() => _isLoading = true);
+    }
+    try {
+      final response = await _apiService.fetchProjectTree();
+      setState(() {
+        _projectTreeResponse = response;
+        _currentDrillDownNode = response.root;
+        _selectedFolderPath = null;
+        _infoTxtContent = null;
+      });
+    } catch (e) {
+      debugPrint('Proje ağacı yüklenirken hata oluştu: $e');
+      _showSnackBar('Proje ağacı yüklenirken hata: $e');
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  // klasör veya node gezme
+  void _navigateToNode(ProjectNode node) {
+    setState(() {
+      _currentDrillDownNode = node;
+      _selectedFolderPath = null;
+      _infoTxtContent = null;
+      _selectedImagePath = null;
+      _imageBytes = null;
+    });
+
+    if (node.imageUrl != null && node.imageUrl!.isNotEmpty) {
+      _selectedImagePath = node.imageUrl;
+      _loadSelectedImage();
+    }
+
+    if (node.infoTxtPath != null) {
+      _loadSelectedVersionContent(node.path);
+    }
+  }
+
+  Future<void> _loadSelectedVersionContent(String? folderPath) async {
+    if (folderPath == null) return;
+    setState(() {
+      _selectedFolderPath = folderPath;
+      _infoTxtContent = null;
+    });
+
+    try {
+      // info.txt yolu
+      final infoTxtFullPath = '$folderPath/info.txt';
+      final infoContent = await _apiService.fetchInfoTxt(infoTxtFullPath);
+
+      // image yolu
+      final imageFullPath = '$folderPath/image.png';
+      String? imageUrl;
+      try {
+        imageUrl = supabase.Supabase.instance.client.storage
+            .from('projects')
+            .getPublicUrl(imageFullPath);
+
+        // sondaki ? karakterini temizle
+        if (imageUrl.endsWith('?')) {
+          imageUrl = imageUrl.substring(0, imageUrl.length - 1);
+        }
+      } catch (e) {
+        debugPrint('Image URL alınamadı: $e');
+        imageUrl = null;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _infoTxtContent = infoContent;
+      });
+    } catch (e) {
+      _showSnackBar('Versiyon içeriği yüklenirken hata: $e');
+    }
+  }
+
+  void _showSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  IconData _getFileIcon(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'hex':
+        return Icons.memory;
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+        return Icons.image;
+      case 'txt':
+        return Icons.description;
+      case 'json':
+        return Icons.code;
+      default:
+        return Icons.insert_drive_file;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: _buildAppBar(),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _projectTreeResponse == null ||
+                _projectTreeResponse!.root.children.isEmpty
+          ? _buildErrorScreen()
+          : Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildProjectTreeSection(),
+                        const SizedBox(width: 20),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  _buildContentPreviewSection(),
+                ],
+              ),
+            ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _openAdminMenu,
+        child: const Icon(Icons.settings),
+      ),
+    );
+  }
+
+  AppBar _buildAppBar() {
+    return AppBar(
+      title: Image.asset('assets/images/elfatek_logo.jpg', height: 40),
+      backgroundColor: Colors.white,
+      elevation: 0,
+      iconTheme: const IconThemeData(color: Colors.blue),
+      leading: IconButton(
+        icon: const Icon(Icons.menu),
+        onPressed: _openAdminMenu,
+      ),
+    );
+  }
+
+  Widget _buildErrorScreen() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.error_outline, color: Colors.red, size: 48),
+          SizedBox(height: 16),
+          Text(
+            'Proje verileri yüklenemedi veya sistemde proje bulunmuyor.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProjectTreeSection() {
+    final isInFolder =
+        _currentDrillDownNode != null && _currentDrillDownNode!.path.isNotEmpty;
+    final title = isInFolder ? _currentDrillDownNode!.name : 'Projeler';
+    final nodesToShow = _currentDrillDownNode?.children ?? [];
+
+    List<Widget> buildNodeTiles() {
+      if (nodesToShow.isEmpty && _currentDrillDownNode?.isFolder == true) {
+        return [const Center(child: Text('Bu klasörde içerik yok.'))];
+      }
+
+      final folders = nodesToShow.where((n) => n.isFolder).toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+      final files = nodesToShow.where((n) => !n.isFolder).toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+
+      return [
+        ...folders.map(
+          (node) => ListTile(
+            leading: const Icon(Icons.folder, color: Colors.blueGrey),
+            title: Text(node.name),
+            onTap: () => _navigateToNode(node),
+          ),
+        ),
+        ...files.map(
+          (node) => ListTile(
+            leading: Icon(_getFileIcon(node.name), color: Colors.blue),
+            title: Text(node.name),
+            onTap: () {
+              final parentPath = node.path.substring(
+                0,
+                node.path.lastIndexOf('/'),
+              );
+              _loadSelectedVersionContent(parentPath);
+
+              final ext = node.name.toLowerCase();
+              if (ext.endsWith('.png') ||
+                  ext.endsWith('.jpg') ||
+                  ext.endsWith('.jpeg')) {
+                setState(() {
+                  _selectedImagePath = node.path;
+                });
+                _loadSelectedImage();
+              } else {
+                setState(() {
+                  _selectedImagePath = null;
+                  _imageBytes = null;
+                });
+              }
+            },
+          ),
+        ),
+      ];
+    }
+
+    void handleBackNavigation() {
+      if (_currentDrillDownNode != null &&
+          _currentDrillDownNode!.path.isNotEmpty) {
+        final segments = _currentDrillDownNode!.path.split('/');
+        if (segments.length == 1) {
+          _navigateToNode(_projectTreeResponse!.root);
+        } else {
+          final parentPath = segments.sublist(0, segments.length - 1).join('/');
+          final parentNode = _findNodeByPath(
+            _projectTreeResponse!.root,
+            parentPath,
+          );
+          _navigateToNode(parentNode ?? _projectTreeResponse!.root);
+        }
+      }
+    }
+
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (isInFolder)
+                IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: handleBackNavigation,
+                ),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const Divider(),
+          Expanded(child: ListView(children: buildNodeTiles())),
+        ],
+      ),
+    );
+  }
+
+  ProjectNode? _findNodeByPath(ProjectNode currentNode, String targetPath) {
+    if (currentNode.path == targetPath) return currentNode;
+    for (var child in currentNode.children) {
+      if (targetPath.startsWith(child.path)) {
+        final foundNode = _findNodeByPath(child, targetPath);
+        if (foundNode != null) return foundNode;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _loadSelectedImage() async {
+    if (_selectedImagePath != null && _selectedImagePath!.isNotEmpty) {
+      Uint8List? bytes;
+      try {
+        if (_selectedImagePath!.startsWith('http://') ||
+            _selectedImagePath!.startsWith('https://')) {
+          final response = await http.get(Uri.parse(_selectedImagePath!));
+          if (response.statusCode == 200) {
+            bytes = response.bodyBytes;
+          } else {
+            debugPrint('URL\'den resim yüklenemedi: ${response.statusCode}');
+          }
+        } else {
+          bytes = await _apiService.fetchImageBytes(_selectedImagePath!);
+        }
+      } catch (e) {
+        debugPrint('Resim yüklenirken hata: $e');
+        bytes = null;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _imageBytes = bytes;
+      });
+    } else {
+      if (!mounted) return;
+      setState(() {
+        _imageBytes = null;
+      });
+    }
+  }
+
+  Widget _buildContentPreviewSection() {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(12.0),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8.0),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.withOpacity(0.2),
+              spreadRadius: 2,
+              blurRadius: 5,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    'Resim Önizleme',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  if (_imageBytes != null)
+                    Expanded(
+                      child: AspectRatio(
+                        aspectRatio: 4 / 3,
+                        child: Image.memory(
+                          _imageBytes!,
+                          fit: BoxFit.contain,
+                          errorBuilder: (context, error, stackTrace) =>
+                              const Text('Resim yüklenemedi'),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const VerticalDivider(),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    'info.txt İçeriği',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  if (_infoTxtContent != null && _infoTxtContent!.isNotEmpty)
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Text(_infoTxtContent!),
+                      ),
+                    )
+                  else
+                    const Text('Gösterilecek bilgi yok'),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openAdminMenu() {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: "AdminMenu",
+      transitionDuration: const Duration(milliseconds: 250),
+      pageBuilder: (context, anim1, anim2) {
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: 280,
+              height: double.infinity,
+              color: Colors.blueGrey.shade900,
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  DrawerHeader(
+                    decoration: const BoxDecoration(color: Colors.blueGrey),
+                    child: Column(
+                      children: [
+                        const CircleAvatar(
+                          radius: 40,
+                          backgroundImage: AssetImage(
+                            'assets/images/profile.jpg',
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          widget.username,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _drawerItem(
+                    Icons.add,
+                    'Dosya Ekle',
+                    onTap: _showFileTypeSelectionDialog,
+                    visible: widget.isAdmin,
+                  ),
+                  _drawerItem(
+                    Icons.folder_open,
+                    'Proje Ekle',
+                    onTap: _showCreateProjectDialog,
+                    visible: true,
+                  ),
+                  _drawerItem(
+                    Icons.folder_copy,
+                    'Versiyon Ekle',
+                    onTap: _showCreateVersionWithFilesDialog,
+                    visible: true,
+                  ),
+                  _drawerItem(
+                    Icons.delete,
+                    'Klasör Sil',
+                    onTap: _handleDeleteFolder,
+                    visible: true,
+                  ),
+                  _drawerItem(
+                    Icons.update,
+                    'Versiyon Güncelle',
+                    onTap: _handleFileUpload,
+                    visible: true,
+                  ),
+                  _drawerItem(
+                    Icons.lock,
+                    'Şifre Değiştir',
+                    onTap: _showChangePasswordDialog,
+                    visible: true,
+                  ),
+                  _drawerItem(
+                    Icons.logout,
+                    'Çıkış Yap',
+                    onTap: _logout,
+                    visible: true,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, anim1, anim2, child) {
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(-1, 0),
+            end: Offset.zero,
+          ).animate(anim1),
+          child: child,
+        );
+      },
+    );
+  }
+
+  Widget _drawerItem(
+    IconData icon,
+    String title, {
+    VoidCallback? onTap,
+    required bool visible,
+  }) {
+    return ListTile(
+      leading: Icon(icon, color: Colors.white),
+      title: Text(title, style: const TextStyle(color: Colors.white)),
+      onTap: () {
+        Navigator.pop(context);
+        onTap?.call();
+      },
+    );
+  }
+
+  void _showFileTypeSelectionDialog() {
+    if (_currentDrillDownNode == null || !_currentDrillDownNode!.isFolder) {
+      _showSnackBar('Lütfen önce bir klasör seçin.');
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Dosya Türü Seç'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => _handleCreateFile('info.txt'),
+            child: const Text('Info (info.txt)'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => _handleCreateFile('image.png'),
+            child: const Text('Image (image.png)'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => _handleCreateFile('firmware.hex'),
+            child: const Text('Firmware (hr.hex)'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => _handleCreateFile('settings.json'),
+            child: const Text('Settings (settings.json)'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleCreateFile(String fileName) async {
+    Navigator.pop(context);
+    if (_currentDrillDownNode == null) return;
+
+    final String targetPath = '${_currentDrillDownNode!.path}/$fileName';
+    final bool ok = await _apiService.createFileOnServer(targetPath);
+
+    _showSnackBar(
+      ok ? '$fileName başarıyla oluşturuldu' : 'Dosya oluşturulamadı',
+    );
+    if (ok) await _fetchProjectTreeAndInit();
+  }
+
+  Future<void> _showCreateProjectDialog() async {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Yeni Proje Oluştur'),
+          content: TextField(
+            controller: ctrl,
+            decoration: const InputDecoration(labelText: 'Proje Adı'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('İptal'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final name = ctrl.text.trim();
+                if (name.isEmpty) return;
+                final ok = await _apiService.createFolderOnServer(name);
+                Navigator.pop(context);
+                _showSnackBar(
+                  ok ? '$name projesi oluşturuldu' : 'Proje oluşturulamadı',
+                );
+                if (ok) await _fetchProjectTreeAndInit();
+              },
+              child: const Text('Oluştur'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _showCreateVersionWithFilesDialog() async {
+    if (_currentDrillDownNode == null || !_currentDrillDownNode!.isFolder) {
+      _showSnackBar('Lütfen önce bir proje klasörü seçin.');
+      return;
+    }
+
+    final versionNameController = TextEditingController();
+
+    // Dosya seçimlerini tutacak değişkenler
+    PlatformFile? infoTxtFile;
+    PlatformFile? imageFile;
+    PlatformFile? hexFile;
+    PlatformFile? settingsFile;
+
+    Future<bool> pickFileForType(String fileType) async {
+      // file_picker ile uzantı filtreleyerek dosya seçtiriyoruz
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: [fileType],
+      );
+      if (result == null || result.files.isEmpty) return false;
+
+      switch (fileType) {
+        case 'txt':
+          infoTxtFile = result.files.first;
+          break;
+        case 'png':
+        case 'jpg':
+          imageFile = result.files.first;
+          break;
+        case 'hex':
+          hexFile = result.files.first;
+          break;
+        case 'json':
+          settingsFile = result.files.first;
+          break;
+      }
+      return true;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Yeni Versiyon Oluştur ve Dosyaları Seç'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: versionNameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Versiyon Adı (örn: v1.0)',
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                ElevatedButton(
+                  onPressed: () async {
+                    final ok = await pickFileForType('txt');
+                    if (ok) _showSnackBar('info.txt seçildi');
+                  },
+                  child: Text(
+                    infoTxtFile == null ? 'info.txt Seç' : 'info.txt seçildi',
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    // jpg veya png olabilir, ikisini seçmek için tekrar prompt yapabiliriz
+                    final result = await FilePicker.platform.pickFiles(
+                      type: FileType.custom,
+                      allowedExtensions: ['jpg', 'png'],
+                    );
+                    if (result != null && result.files.isNotEmpty) {
+                      imageFile = result.files.first;
+                      _showSnackBar('Resim dosyası seçildi');
+                      setState(() {}); // UI güncellemesi için
+                    }
+                  },
+                  child: Text(
+                    imageFile == null
+                        ? 'Resim Dosyası Seç (jpg/png)'
+                        : 'Resim seçildi',
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final ok = await pickFileForType('hex');
+                    if (ok) _showSnackBar('Firmware (.hex) seçildi');
+                  },
+                  child: Text(
+                    hexFile == null
+                        ? 'Firmware (.hex) Seç'
+                        : 'Firmware seçildi',
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final ok = await pickFileForType('json');
+                    if (ok) _showSnackBar('Settings (.json) seçildi');
+                  },
+                  child: Text(
+                    settingsFile == null
+                        ? 'Settings (.json) Seç'
+                        : 'Settings seçildi',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('İptal'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final versionName = versionNameController.text.trim();
+                if (versionName.isEmpty) {
+                  _showSnackBar('Lütfen versiyon adı girin.');
+                  return;
+                }
+                if (infoTxtFile == null ||
+                    imageFile == null ||
+                    hexFile == null ||
+                    settingsFile == null) {
+                  _showSnackBar('Lütfen tüm dosyaları seçin.');
+                  return;
+                }
+
+                final versionPath =
+                    '${_currentDrillDownNode!.path}/$versionName';
+
+                // Versiyon klasörü oluştur
+                final folderCreated = await _apiService.createFolderOnServer(
+                  versionPath,
+                );
+                if (!folderCreated) {
+                  _showSnackBar('Versiyon klasörü oluşturulamadı.');
+                  return;
+                }
+
+                // Dosyaları yükle (apiService’de uygun fonksiyon olmalı)
+                bool uploadSuccess = true;
+
+                // info.txt
+                uploadSuccess &= await _uploadFile(
+                  versionPath,
+                  'info.txt',
+                  infoTxtFile!,
+                );
+
+                // image.jpg/png -> backendde sabit image.jpg olarak kaydediliyor
+                // uzantıyı jpg yapabiliriz ya da backend png kabul ediyorsa olduğu gibi
+                final imageExt = imageFile!.extension?.toLowerCase();
+                final imageFileName = (imageExt == 'png' || imageExt == 'jpg')
+                    ? 'image.$imageExt'
+                    : 'image.jpg';
+                uploadSuccess &= await _uploadFile(
+                  versionPath,
+                  imageFileName,
+                  imageFile!,
+                );
+
+                // firmware.hex
+                uploadSuccess &= await _uploadFile(
+                  versionPath,
+                  'hr.hex',
+                  hexFile!,
+                );
+
+                // settings.json
+                uploadSuccess &= await _uploadFile(
+                  versionPath,
+                  'settings.json',
+                  settingsFile!,
+                );
+
+                Navigator.pop(context);
+
+                _showSnackBar(
+                  uploadSuccess
+                      ? 'Versiyon ve dosyalar başarıyla oluşturuldu'
+                      : 'Dosya yükleme sırasında hata oluştu',
+                );
+                if (uploadSuccess) await _fetchProjectTreeAndInit();
+              },
+              child: const Text('Oluştur'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Dosya yükleme yardımcı fonksiyonu
+  Future<bool> _uploadFile(
+    String folderPath,
+    String targetFileName,
+    PlatformFile file,
+  ) async {
+    try {
+      // _apiService.createFileOnServer + updateFile gibi davranabilir veya direkt upload API kullanabilirsin
+      final fullPath = '$folderPath/$targetFileName';
+
+      // Önce boş dosya oluşturuyoruz
+      bool created = await _apiService.createFileOnServer(fullPath);
+      if (!created) return false;
+
+      // Sonra içeriği base64 olarak veya bytes olarak backend'e gönderiyoruz
+      // Burada örnek text dosyası için base64 kullanalım, diğer dosyalar byte stream olabilir (backend desteklemeli)
+      final bytes = file.bytes ?? await File(file.path!).readAsBytes();
+      final contentBase64 = base64Encode(bytes);
+
+      // Backend'in updateFileContent API'si base64 destekliyorsa direkt kullan, değilse adaptasyon gerekir
+      // Örnek: updateFile fonksiyonu base64 destekliyorsa:
+      final updated = await _apiService.updateFileContentBase64(
+        fullPath,
+        contentBase64,
+      );
+
+      return updated;
+    } catch (e) {
+      print('Dosya yükleme hatası: $e');
+      return false;
+    }
+  }
+
+  Future<void> _handleFileUpload() async {
+    // 1. Dosya seç
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['txt', 'jpg', 'jpeg', 'png', 'hex', 'json'],
+    );
+
+    if (result == null) {
+      _showSnackBar('Dosya seçilmedi');
+      return;
+    }
+
+    final file = File(result.files.single.path!);
+    final originalFileName = result.files.single.name.toLowerCase();
+
+    // 2. Dosya türüne göre backend'te kullanılacak dosya adı
+    String saveAs = '';
+    if (originalFileName.endsWith('.txt')) {
+      saveAs = 'info.txt';
+    } else if (originalFileName.endsWith('.jpg') ||
+        originalFileName.endsWith('.jpeg') ||
+        originalFileName.endsWith('.png')) {
+      saveAs = 'image.jpg';
+    } else if (originalFileName.endsWith('.hex')) {
+      saveAs = 'hr.hex';
+    } else if (originalFileName.endsWith('.json')) {
+      saveAs = 'settings.json';
+    } else {
+      _showSnackBar('Desteklenmeyen dosya türü');
+      return;
+    }
+
+    bool ok = false;
+    try {
+      ok = await _apiService.uploadFile('$_selectedFolderPath/$saveAs', file);
+    } catch (e) {
+      _showSnackBar('Dosya yükleme hatası: $e');
+      return;
+    }
+
+    // 4. Sonuç mesajı ve ağaç yenileme
+    if (ok) {
+      _showSnackBar('$saveAs başarıyla yüklendi');
+      await _fetchProjectTreeAndInit();
+    } else {
+      _showSnackBar('Dosya yükleme başarısız');
+    }
+  }
+
+  // --- Klasör Silme ---
+  Future<void> _handleDeleteFolder() async {
+    if (_currentDrillDownNode == null || _currentDrillDownNode!.path.isEmpty) {
+      _showSnackBar('Lütfen silinecek klasörü seçin.');
+      return;
+    }
+    final ok = await _apiService.deleteFolder(_currentDrillDownNode!.path);
+    _showSnackBar(ok ? 'Klasör silindi' : 'Klasör silinemedi');
+    if (ok) {
+      await _fetchProjectTreeAndInit();
+      _navigateToNode(_projectTreeResponse!.root);
+    }
+  }
+
+  // --- Şifre Değiştirme ---
+  void _showChangePasswordDialog() {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Şifre Değiştir'),
+          content: TextField(
+            controller: ctrl,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Yeni Şifre'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('İptal'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final newPass = ctrl.text.trim();
+                if (newPass.isEmpty) return;
+                try {
+                  await supabase.Supabase.instance.client.auth.updateUser(
+                    supabase.UserAttributes(password: newPass),
+                  );
+                  Navigator.pop(context);
+                  _showSnackBar('Şifre değiştirildi');
+                } catch (e) {
+                  Navigator.pop(context);
+                  _showSnackBar('Hata: $e');
+                }
+              },
+              child: const Text('Kaydet'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // --- Çıkış ---
+  void _logout() async {
+    try {
+      await supabase.Supabase.instance.client.auth.signOut();
+      if (!mounted) return;
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+    } catch (e) {
+      _showSnackBar('Çıkış yapılamadı: $e');
+    }
+  }
+}
